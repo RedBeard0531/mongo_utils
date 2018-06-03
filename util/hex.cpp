@@ -50,6 +50,10 @@ std::string integerToHexDef(T inInt) {
 }
 
 template <>
+std::string integerToHex<char>(char val) {
+    return integerToHexDef(val);
+}
+template <>
 std::string integerToHex<int>(int val) {
     return integerToHexDef(val);
 }

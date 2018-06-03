@@ -26,11 +26,11 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/platform/overflow_arithmetic.h"
 #include "mongo/transport/session.h"
+#include "mongo/util/hex.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/text.h"
-
 
 namespace mongo {
 
@@ -53,6 +53,7 @@ ExportedServerParameter<std::string, ServerParameterType::kStartupOnly>
     setDiffieHellmanParameterPEMFile(ServerParameterSet::getGlobal(),
                                      "opensslDiffieHellmanParameters",
                                      &sslGlobalParams.sslPEMTempDHParam);
+
 }  // namespace
 
 SSLPeerInfo& SSLPeerInfo::forSession(const transport::SessionHandle& session) {
@@ -93,6 +94,72 @@ public:
 #ifdef MONGO_CONFIG_SSL
 
 namespace {
+#if MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
+// OpenSSL has a more complete library of OID to SN mappings.
+std::string x509OidToShortName(const std::string& name) {
+    const auto* sn = OBJ_nid2sn(OBJ_txt2nid(entry.oid.c_str()));
+    if (!sn) {
+        return name;
+    }
+    return sn;
+}
+#else
+// On Apple/Windows we have to provide our own mapping.
+std::string x509OidToShortName(const std::string& name) {
+    static const std::map<std::string, std::string> kX509OidToShortNameMappings = {
+        {"0.9.2342.19200300.100.1.1", "UID"},
+        {"0.9.2342.19200300.100.1.25", "DC"},
+        {"1.2.840.113549.1.9.1", "emailAddress"},
+        {"2.5.4.3", "CN"},
+        {"2.5.4.6", "C"},
+        {"2.5.4.7", "L"},
+        {"2.5.4.8", "ST"},
+        {"2.5.4.9", "STREET"},
+        {"2.5.4.10", "O"},
+        {"2.5.4.11", "OU"},
+    };
+
+    auto it = kX509OidToShortNameMappings.find(name);
+    if (it == kX509OidToShortNameMappings.end()) {
+        return name;
+    }
+    return it->second;
+}
+#endif
+}  // namespace
+
+StatusWith<std::string> SSLX509Name::getOID(StringData oid) const {
+    for (const auto& rdn : _entries) {
+        for (const auto& entry : rdn) {
+            if (entry.oid == oid) {
+                return entry.value;
+            }
+        }
+    }
+    return {ErrorCodes::KeyNotFound, "OID does not exist"};
+}
+
+StringBuilder& operator<<(StringBuilder& os, const SSLX509Name& name) {
+    std::string comma;
+    for (const auto& rdn : name._entries) {
+        std::string plus;
+        os << comma;
+        for (const auto& entry : rdn) {
+            os << plus << x509OidToShortName(entry.oid) << "=" << escapeRfc2253(entry.value);
+            plus = "+";
+        }
+        comma = ",";
+    }
+    return os;
+}
+
+std::string SSLX509Name::toString() const {
+    StringBuilder os;
+    os << *this;
+    return os.str();
+}
+
+namespace {
 void canonicalizeClusterDN(std::vector<std::string>* dn) {
     // remove all RDNs we don't care about
     for (size_t i = 0; i < dn->size(); i++) {
@@ -107,30 +174,62 @@ void canonicalizeClusterDN(std::vector<std::string>* dn) {
     }
     std::stable_sort(dn->begin(), dn->end());
 }
+
+constexpr StringData kOID_DC = "0.9.2342.19200300.100.1.25"_sd;
+constexpr StringData kOID_O = "2.5.4.10"_sd;
+constexpr StringData kOID_OU = "2.5.4.11"_sd;
+
+std::vector<SSLX509Name::Entry> canonicalizeClusterDN(
+    const std::vector<std::vector<SSLX509Name::Entry>>& entries) {
+    std::vector<SSLX509Name::Entry> ret;
+
+    for (const auto& rdn : entries) {
+        for (const auto& entry : rdn) {
+            if ((entry.oid != kOID_DC) && (entry.oid != kOID_O) && (entry.oid != kOID_OU)) {
+                continue;
+            }
+            ret.push_back(entry);
+        }
+    }
+    std::stable_sort(ret.begin(), ret.end());
+    return ret;
+}
 }  // namespace
+
+/**
+ * The behavior of isClusterMember() is subtly different when passed
+ * an SSLX509Name versus a StringData.
+ *
+ * The SSLX509Name version (immediately below) compares distinguished
+ * names in their raw, unescaped forms and provides a more reliable match.
+ *
+ * The StringData version attempts to do a simplified string compare
+ * with the serialized version of the server subject name.
+ *
+ * Because escaping is not checked in the StringData version,
+ * some not-strictly matching RDNs will appear to share O/OU/DC with the
+ * server subject name.  Therefore, that variant should be called with care.
+ */
+bool SSLConfiguration::isClusterMember(const SSLX509Name& subject) const {
+    auto client = canonicalizeClusterDN(subject._entries);
+    auto server = canonicalizeClusterDN(serverSubjectName._entries);
+
+    return !client.empty() && (client == server);
+}
 
 bool SSLConfiguration::isClusterMember(StringData subjectName) const {
     std::vector<std::string> clientRDN = StringSplitter::split(subjectName.toString(), ",");
-    std::vector<std::string> serverRDN = StringSplitter::split(serverSubjectName, ",");
+    std::vector<std::string> serverRDN = StringSplitter::split(serverSubjectName.toString(), ",");
 
     canonicalizeClusterDN(&clientRDN);
     canonicalizeClusterDN(&serverRDN);
 
-    if (clientRDN.size() == 0 || clientRDN.size() != serverRDN.size()) {
-        return false;
-    }
-
-    for (size_t i = 0; i < serverRDN.size(); i++) {
-        if (clientRDN[i] != serverRDN[i]) {
-            return false;
-        }
-    }
-    return true;
+    return !clientRDN.empty() && (clientRDN == serverRDN);
 }
 
 BSONObj SSLConfiguration::getServerStatusBSON() const {
     BSONObjBuilder security;
-    security.append("SSLServerSubjectName", serverSubjectName);
+    security.append("SSLServerSubjectName", serverSubjectName.toString());
     security.appendBool("SSLServerHasCertificateAuthority", hasCA);
     security.appendDate("SSLServerCertificateExpirationDate", serverCertificateExpirationDate);
     return security.obj();
@@ -448,6 +547,83 @@ StatusWith<stdx::unordered_set<RoleName>> parsePeerRoles(ConstDataRange cdrExten
 
     return roles;
 }
+
+std::string removeFQDNRoot(std::string name) {
+    if (name.back() == '.') {
+        name.pop_back();
+    }
+    return name;
+};
+
+namespace {
+
+// Characters that need to be escaped in RFC 2253
+const std::array<char, 7> rfc2253EscapeChars = {',', '+', '"', '\\', '<', '>', ';'};
+
+}  // namespace
+
+// See section "2.4 Converting an AttributeValue from ASN.1 to a String" in RFC 2243
+std::string escapeRfc2253(StringData str) {
+    std::string ret;
+
+    if (str.size() > 0) {
+        size_t pos = 0;
+
+        // a space or "#" character occurring at the beginning of the string
+        if (str[0] == ' ') {
+            ret = "\\ ";
+            pos = 1;
+        } else if (str[0] == '#') {
+            ret = "\\#";
+            pos = 1;
+        }
+
+        while (pos < str.size()) {
+            if (static_cast<signed char>(str[pos]) < 0) {
+                ret += '\\';
+                ret += integerToHex(str[pos]);
+            } else {
+                if (std::find(rfc2253EscapeChars.cbegin(), rfc2253EscapeChars.cend(), str[pos]) !=
+                    rfc2253EscapeChars.cend()) {
+                    ret += '\\';
+                }
+
+                ret += str[pos];
+            }
+            ++pos;
+        }
+
+        // a space character occurring at the end of the string
+        if (ret.size() > 2 && ret[ret.size() - 1] == ' ') {
+            ret[ret.size() - 1] = '\\';
+            ret += ' ';
+        }
+    }
+
+    return ret;
+}
+
 #endif
 
 }  // namespace mongo
+
+#ifdef MONGO_CONFIG_SSL
+// TODO SERVER-11601 Use NFC Unicode canonicalization
+bool mongo::hostNameMatchForX509Certificates(std::string nameToMatch, std::string certHostName) {
+    nameToMatch = removeFQDNRoot(std::move(nameToMatch));
+    certHostName = removeFQDNRoot(std::move(certHostName));
+
+    if (certHostName.size() < 2) {
+        return false;
+    }
+
+    // match wildcard DNS names
+    if (certHostName[0] == '*' && certHostName[1] == '.') {
+        // allow name.example.com if the cert is *.example.com, '*' does not match '.'
+        const char* subName = strchr(nameToMatch.c_str(), '.');
+        return subName && !strcasecmp(certHostName.c_str() + 1, subName);
+    } else {
+        return !strcasecmp(nameToMatch.c_str(), certHostName.c_str());
+    }
+}
+#endif

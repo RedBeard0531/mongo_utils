@@ -11,7 +11,7 @@
  *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  *   See the License for the specific language governing permissions and
  *   limitations under the License.
- *
+ */
  *    Based upon boost.accumulators (www.boost.org/libs/accumulators/),
  *    distributed under the Boost Software License, Version 1.0.
  *    See distrc/THIRD_PARTY_NOTICES for the full License Notice for Boost.

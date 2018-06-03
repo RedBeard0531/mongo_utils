@@ -21,8 +21,6 @@
 
 #include "mongo/util/assert_util.h"
 
-using namespace std;
-
 #ifndef _WIN32
 #include <cxxabi.h>
 #include <sys/file.h>
@@ -65,42 +63,32 @@ AtomicBool DBException::traceExceptions(false);
 
 void DBException::traceIfNeeded(const DBException& e) {
     if (traceExceptions.load()) {
-        warning() << "DBException thrown" << causedBy(e) << endl;
+        warning() << "DBException thrown" << causedBy(e) << std::endl;
         printStackTrace();
     }
 }
 
 NOINLINE_DECL void verifyFailed(const char* expr, const char* file, unsigned line) {
     assertionCount.condrollover(++assertionCount.regular);
-    error() << "Assertion failure " << expr << ' ' << file << ' ' << dec << line << endl;
+    error() << "Assertion failure " << expr << ' ' << file << ' ' << std::dec << line << std::endl;
     logContext();
-    stringstream temp;
+    std::stringstream temp;
     temp << "assertion " << file << ":" << line;
 
     breakpoint();
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
     // this is so we notice in buildbot
-    severe() << "\n\n***aborting after verify() failure as this is a debug/test build\n\n" << endl;
+    severe() << "\n\n***aborting after verify() failure as this is a debug/test build\n\n"
+             << std::endl;
     std::abort();
 #endif
     error_details::throwExceptionForStatus(Status(ErrorCodes::UnknownError, temp.str()));
 }
 
 NOINLINE_DECL void invariantFailed(const char* expr, const char* file, unsigned line) noexcept {
-    severe() << "Invariant failure " << expr << ' ' << file << ' ' << dec << line << endl;
+    severe() << "Invariant failure " << expr << ' ' << file << ' ' << std::dec << line << std::endl;
     breakpoint();
-    severe() << "\n\n***aborting after invariant() failure\n\n" << endl;
-    std::abort();
-}
-
-NOINLINE_DECL void invariantFailedWithMsg(const char* expr,
-                                          const char* msg,
-                                          const char* file,
-                                          unsigned line) noexcept {
-    severe() << "Invariant failure " << expr << " " << msg << " " << file << ' ' << dec << line
-             << endl;
-    breakpoint();
-    severe() << "\n\n***aborting after invariant() failure\n\n" << endl;
+    severe() << "\n\n***aborting after invariant() failure\n\n" << std::endl;
     std::abort();
 }
 
@@ -108,7 +96,11 @@ NOINLINE_DECL void invariantFailedWithMsg(const char* expr,
                                           const std::string& msg,
                                           const char* file,
                                           unsigned line) noexcept {
-    invariantFailedWithMsg(expr, msg.c_str(), file, line);
+    severe() << "Invariant failure " << expr << " " << msg << " " << file << ' ' << std::dec << line
+             << std::endl;
+    breakpoint();
+    severe() << "\n\n***aborting after invariant() failure\n\n" << std::endl;
+    std::abort();
 }
 
 NOINLINE_DECL void invariantOKFailed(const char* expr,
@@ -116,25 +108,37 @@ NOINLINE_DECL void invariantOKFailed(const char* expr,
                                      const char* file,
                                      unsigned line) noexcept {
     severe() << "Invariant failure: " << expr << " resulted in status " << redact(status) << " at "
-             << file << ' ' << dec << line;
+             << file << ' ' << std::dec << line;
     breakpoint();
-    severe() << "\n\n***aborting after invariant() failure\n\n" << endl;
+    severe() << "\n\n***aborting after invariant() failure\n\n" << std::endl;
+    std::abort();
+}
+
+NOINLINE_DECL void invariantOKFailedWithMsg(const char* expr,
+                                            const Status& status,
+                                            const std::string& msg,
+                                            const char* file,
+                                            unsigned line) noexcept {
+    severe() << "Invariant failure: " << expr << " " << msg << " resulted in status "
+             << redact(status) << " at " << file << ' ' << std::dec << line;
+    breakpoint();
+    severe() << "\n\n***aborting after invariant() failure\n\n" << std::endl;
     std::abort();
 }
 
 NOINLINE_DECL void fassertFailedWithLocation(int msgid, const char* file, unsigned line) noexcept {
-    severe() << "Fatal Assertion " << msgid << " at " << file << " " << dec << line;
+    severe() << "Fatal Assertion " << msgid << " at " << file << " " << std::dec << line;
     breakpoint();
-    severe() << "\n\n***aborting after fassert() failure\n\n" << endl;
+    severe() << "\n\n***aborting after fassert() failure\n\n" << std::endl;
     std::abort();
 }
 
 NOINLINE_DECL void fassertFailedNoTraceWithLocation(int msgid,
                                                     const char* file,
                                                     unsigned line) noexcept {
-    severe() << "Fatal Assertion " << msgid << " at " << file << " " << dec << line;
+    severe() << "Fatal Assertion " << msgid << " at " << file << " " << std::dec << line;
     breakpoint();
-    severe() << "\n\n***aborting after fassert() failure\n\n" << endl;
+    severe() << "\n\n***aborting after fassert() failure\n\n" << std::endl;
     quickExit(EXIT_ABRUPT);
 }
 
@@ -142,10 +146,10 @@ MONGO_COMPILER_NORETURN void fassertFailedWithStatusWithLocation(int msgid,
                                                                  const Status& status,
                                                                  const char* file,
                                                                  unsigned line) noexcept {
-    severe() << "Fatal assertion " << msgid << " " << redact(status) << " at " << file << " " << dec
-             << line;
+    severe() << "Fatal assertion " << msgid << " " << redact(status) << " at " << file << " "
+             << std::dec << line;
     breakpoint();
-    severe() << "\n\n***aborting after fassert() failure\n\n" << endl;
+    severe() << "\n\n***aborting after fassert() failure\n\n" << std::endl;
     std::abort();
 }
 
@@ -153,22 +157,22 @@ MONGO_COMPILER_NORETURN void fassertFailedWithStatusNoTraceWithLocation(int msgi
                                                                         const Status& status,
                                                                         const char* file,
                                                                         unsigned line) noexcept {
-    severe() << "Fatal assertion " << msgid << " " << redact(status) << " at " << file << " " << dec
-             << line;
+    severe() << "Fatal assertion " << msgid << " " << redact(status) << " at " << file << " "
+             << std::dec << line;
     breakpoint();
-    severe() << "\n\n***aborting after fassert() failure\n\n" << endl;
+    severe() << "\n\n***aborting after fassert() failure\n\n" << std::endl;
     quickExit(EXIT_ABRUPT);
 }
 
 NOINLINE_DECL void uassertedWithLocation(const Status& status, const char* file, unsigned line) {
     assertionCount.condrollover(++assertionCount.user);
-    LOG(1) << "User Assertion: " << redact(status) << ' ' << file << ' ' << dec << line;
+    LOG(1) << "User Assertion: " << redact(status) << ' ' << file << ' ' << std::dec << line;
     error_details::throwExceptionForStatus(status);
 }
 
 NOINLINE_DECL void msgassertedWithLocation(const Status& status, const char* file, unsigned line) {
     assertionCount.condrollover(++assertionCount.msg);
-    error() << "Assertion: " << redact(status) << ' ' << file << ' ' << dec << line;
+    error() << "Assertion: " << redact(status) << ' ' << file << ' ' << std::dec << line;
     error_details::throwExceptionForStatus(status);
 }
 
@@ -201,7 +205,7 @@ std::string causedBy(const Status& e) {
     return causedBy(e.toString());
 }
 
-string demangleName(const type_info& typeinfo) {
+std::string demangleName(const std::type_info& typeinfo) {
 #ifdef _WIN32
     return typeinfo.name();
 #else
@@ -211,7 +215,7 @@ string demangleName(const type_info& typeinfo) {
     if (!niceName)
         return typeinfo.name();
 
-    string s = niceName;
+    std::string s = niceName;
     free(niceName);
     return s;
 #endif

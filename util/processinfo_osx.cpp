@@ -52,7 +52,7 @@ bool ProcessInfo::supported() {
 }
 
 // get the number of CPUs available to the scheduler
-boost::optional<unsigned long> ProcessInfo::getNumAvailableCores() {
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
     long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
     if (nprocs)
         return nprocs;
@@ -104,10 +104,6 @@ int ProcessInfo::getResidentSize() {
         return 0;
     }
     return (int)(ti.resident_size / (1024 * 1024));
-}
-
-double ProcessInfo::getMaxSystemFileCachePercentage() {
-    return 0.0;
 }
 
 double ProcessInfo::getSystemMemoryPressurePercentage() {

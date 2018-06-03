@@ -43,7 +43,6 @@
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/private/ssl_expiration.h"
-#include "mongo/util/net/sock.h"
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_types.h"
@@ -64,14 +63,6 @@
 namespace mongo {
 
 namespace {
-
-std::string removeFQDNRoot(std::string name) {
-    if (name.back() == '.') {
-        name.pop_back();
-    }
-    return name;
-};
-
 
 // Because the hostname having a slash is used by `mongo::SockAddr` to determine if a hostname is a
 // Unix Domain Socket endpoint, this function uses the same logic.  (See
@@ -172,6 +163,9 @@ IMPLEMENT_ASN1_ENCODE_FUNCTIONS_const_fname(ASN1_SEQUENCE_ANY, ASN1_SET_ANY, ASN
 // OpenSSL versions.
 const STACK_OF(X509_EXTENSION) * X509_get0_extensions(const X509* peerCert) {
     return peerCert->cert_info->extensions;
+}
+inline int X509_NAME_ENTRY_set(const X509_NAME_ENTRY* ne) {
+    return ne->set;
 }
 #endif
 
@@ -363,7 +357,7 @@ private:
      * Given an error code from an SSL-type IO function, logs an
      * appropriate message and throws a NetworkException.
      */
-    MONGO_COMPILER_NORETURN void _handleSSLError(int code, int ret);
+    MONGO_COMPILER_NORETURN void _handleSSLError(SSLConnectionOpenSSL* conn, int ret);
 
     /*
      * Init the SSL context using parameters provided in params. This SSL context will
@@ -391,7 +385,7 @@ private:
      */
     bool _parseAndValidateCertificate(const std::string& keyFile,
                                       const std::string& keyPassword,
-                                      std::string* subjectName,
+                                      SSLX509Name* subjectName,
                                       Date_t* serverNotAfter);
 
 
@@ -494,23 +488,42 @@ SSLManagerInterface* getSSLManager() {
     return NULL;
 }
 
-std::string getCertificateSubjectName(X509* cert) {
-    std::string result;
+SSLX509Name getCertificateSubjectX509Name(X509* cert) {
+    std::vector<std::vector<SSLX509Name::Entry>> entries;
 
-    BIO* out = BIO_new(BIO_s_mem());
-    uassert(16884, "unable to allocate BIO memory", NULL != out);
-    ON_BLOCK_EXIT(BIO_free, out);
+    auto name = X509_get_subject_name(cert);
+    int count = X509_NAME_entry_count(name);
+    int prevSet = -1;
+    std::vector<SSLX509Name::Entry> rdn;
+    for (int i = count - 1; i >= 0; --i) {
+        auto* entry = X509_NAME_get_entry(name, i);
 
-    if (X509_NAME_print_ex(out, X509_get_subject_name(cert), 0, XN_FLAG_RFC2253) >= 0) {
-        if (BIO_number_written(out) > 0) {
-            result.resize(BIO_number_written(out));
-            BIO_read(out, &result[0], result.size());
+        const auto currentSet = X509_NAME_ENTRY_set(entry);
+        if (currentSet != prevSet) {
+            if (!rdn.empty()) {
+                entries.push_back(std::move(rdn));
+                rdn = std::vector<SSLX509Name::Entry>();
+            }
+            prevSet = currentSet;
         }
-    } else {
-        log() << "failed to convert subject name to RFC2253 format";
+
+        char buffer[128];
+        // OBJ_obj2txt can only fail if we pass a nullptr from get_object,
+        // or if OpenSSL's BN library falls over.
+        // In either case, just panic.
+        uassert(ErrorCodes::InvalidSSLConfiguration,
+                "Unable to parse certiciate subject name",
+                OBJ_obj2txt(buffer, sizeof(buffer), X509_NAME_ENTRY_get_object(entry), 1) > 0);
+
+        const auto* str = X509_NAME_ENTRY_get_data(entry);
+        rdn.emplace_back(
+            buffer, str->type, std::string(reinterpret_cast<const char*>(str->data), str->length));
+    }
+    if (!rdn.empty()) {
+        entries.push_back(std::move(rdn));
     }
 
-    return result;
+    return SSLX509Name(std::move(entries));
 }
 
 SSLConnectionOpenSSL::SSLConnectionOpenSSL(SSL_CTX* context,
@@ -615,7 +628,7 @@ int SSLManagerOpenSSL::SSL_read(SSLConnectionInterface* connInterface, void* buf
     } while (!_doneWithSSLOp(conn, status));
 
     if (status <= 0)
-        _handleSSLError(SSL_get_error(conn->ssl, status), status);
+        _handleSSLError(conn, status);
     return status;
 }
 
@@ -627,7 +640,7 @@ int SSLManagerOpenSSL::SSL_write(SSLConnectionInterface* connInterface, const vo
     } while (!_doneWithSSLOp(conn, status));
 
     if (status <= 0)
-        _handleSSLError(SSL_get_error(conn->ssl, status), status);
+        _handleSSLError(conn, status);
     return status;
 }
 
@@ -639,7 +652,7 @@ int SSLManagerOpenSSL::SSL_shutdown(SSLConnectionInterface* connInterface) {
     } while (!_doneWithSSLOp(conn, status));
 
     if (status < 0)
-        _handleSSLError(SSL_get_error(conn->ssl, status), status);
+        _handleSSLError(conn, status);
     return status;
 }
 
@@ -800,7 +813,7 @@ unsigned long long SSLManagerOpenSSL::_convertASN1ToMillis(ASN1_TIME* asn1time) 
 
 bool SSLManagerOpenSSL::_parseAndValidateCertificate(const std::string& keyFile,
                                                      const std::string& keyPassword,
-                                                     std::string* subjectName,
+                                                     SSLX509Name* subjectName,
                                                      Date_t* serverCertificateExpirationDate) {
     BIO* inBIO = BIO_new(BIO_s_file());
     if (inBIO == NULL) {
@@ -827,7 +840,7 @@ bool SSLManagerOpenSSL::_parseAndValidateCertificate(const std::string& keyFile,
     }
     ON_BLOCK_EXIT(X509_free, x509);
 
-    *subjectName = getCertificateSubjectName(x509);
+    *subjectName = getCertificateSubjectX509Name(x509);
     if (serverCertificateExpirationDate != NULL) {
         unsigned long long notBeforeMillis = _convertASN1ToMillis(X509_get_notBefore(x509));
         if (notBeforeMillis == 0) {
@@ -1178,14 +1191,14 @@ SSLConnectionInterface* SSLManagerOpenSSL::connect(Socket* socket) {
     const auto undotted = removeFQDNRoot(socket->remoteAddr().hostOrIp());
     int ret = ::SSL_set_tlsext_host_name(sslConn->ssl, undotted.c_str());
     if (ret != 1)
-        _handleSSLError(SSL_get_error(sslConn.get()->ssl, ret), ret);
+        _handleSSLError(sslConn.get(), ret);
 
     do {
         ret = ::SSL_connect(sslConn->ssl);
     } while (!_doneWithSSLOp(sslConn.get(), ret));
 
     if (ret != 1)
-        _handleSSLError(SSL_get_error(sslConn.get()->ssl, ret), ret);
+        _handleSSLError(sslConn.get(), ret);
 
     return sslConn.release();
 }
@@ -1202,7 +1215,7 @@ SSLConnectionInterface* SSLManagerOpenSSL::accept(Socket* socket,
     } while (!_doneWithSSLOp(sslConn.get(), ret));
 
     if (ret != 1)
-        _handleSSLError(SSL_get_error(sslConn.get()->ssl, ret), ret);
+        _handleSSLError(sslConn.get(), ret);
 
     return sslConn.release();
 }
@@ -1232,6 +1245,7 @@ StatusWith<boost::optional<SSLPeerInfo>> SSLManagerOpenSSL::parseAndValidatePeer
         if (_allowInvalidCertificates) {
             warning() << "SSL peer certificate validation failed: "
                       << X509_verify_cert_error_string(result);
+            return {boost::none};
         } else {
             str::stream msg;
             msg << "SSL peer certificate validation failed: "
@@ -1242,8 +1256,8 @@ StatusWith<boost::optional<SSLPeerInfo>> SSLManagerOpenSSL::parseAndValidatePeer
     }
 
     // TODO: check optional cipher restriction, using cert.
-    std::string peerSubjectName = getCertificateSubjectName(peerCert);
-    LOG(2) << "Accepted TLS connection from peer: " << peerSubjectName;
+    auto peerSubject = getCertificateSubjectX509Name(peerCert);
+    LOG(2) << "Accepted TLS connection from peer: " << peerSubject;
 
     StatusWith<stdx::unordered_set<RoleName>> swPeerCertificateRoles = _parsePeerRoles(peerCert);
     if (!swPeerCertificateRoles.isOK()) {
@@ -1254,7 +1268,7 @@ StatusWith<boost::optional<SSLPeerInfo>> SSLManagerOpenSSL::parseAndValidatePeer
     // perform hostname validation of the remote server
     if (remoteHost.empty()) {
         return boost::make_optional(
-            SSLPeerInfo(peerSubjectName, std::move(swPeerCertificateRoles.getValue())));
+            SSLPeerInfo(peerSubject, std::move(swPeerCertificateRoles.getValue())));
     }
 
     // Try to match using the Subject Alternate Name, if it exists.
@@ -1284,19 +1298,19 @@ StatusWith<boost::optional<SSLPeerInfo>> SSLManagerOpenSSL::parseAndValidatePeer
             }
         }
         sk_GENERAL_NAME_pop_free(sanNames, GENERAL_NAME_free);
-    } else if (peerSubjectName.find("CN=") != std::string::npos) {
+    } else {
         // If Subject Alternate Name (SAN) doesn't exist and Common Name (CN) does,
         // check Common Name.
-        int cnBegin = peerSubjectName.find("CN=") + 3;
-        int cnEnd = peerSubjectName.find(",", cnBegin);
-        std::string commonName = peerSubjectName.substr(cnBegin, cnEnd - cnBegin);
-
-        if (hostNameMatchForX509Certificates(remoteHost, commonName)) {
-            cnMatch = true;
+        auto swCN = peerSubject.getOID(kOID_CommonName);
+        if (swCN.isOK()) {
+            auto commonName = std::move(swCN.getValue());
+            if (hostNameMatchForX509Certificates(remoteHost, commonName)) {
+                cnMatch = true;
+            }
+            certificateNames << "CN: " << commonName;
+        } else {
+            certificateNames << "No Common Name (CN) or Subject Alternate Names (SAN) found";
         }
-        certificateNames << "CN: " << commonName;
-    } else {
-        certificateNames << "No Common Name (CN) or Subject Alternate Names (SAN) found";
     }
 
     if (!sanMatch && !cnMatch) {
@@ -1312,7 +1326,7 @@ StatusWith<boost::optional<SSLPeerInfo>> SSLManagerOpenSSL::parseAndValidatePeer
         }
     }
 
-    return boost::make_optional(SSLPeerInfo(peerSubjectName, stdx::unordered_set<RoleName>()));
+    return boost::make_optional(SSLPeerInfo(peerSubject, stdx::unordered_set<RoleName>()));
 }
 
 
@@ -1349,100 +1363,9 @@ StatusWith<stdx::unordered_set<RoleName>> SSLManagerOpenSSL::_parsePeerRoles(X50
             // We've found an extension which has our roles OID
             ASN1_OCTET_STRING* data = X509_EXTENSION_get_data(ex);
 
-            /*
-             * MongoDBAuthorizationGrant ::= CHOICE {
-             *  MongoDBRole,
-             *  ...!UTF8String:"Unrecognized entity in MongoDBAuthorizationGrant"
-             * }
-             * MongoDBAuthorizationGrants ::= SET OF MongoDBAuthorizationGrant
-             */
-            // Extract the set of roles from our extension, and load them into an OpenSSL stack.
-            STACK_OF(ASN1_TYPE)* mongoDBAuthorizationGrants = nullptr;
-
-            // OpenSSL's parsing function will try and manipulate the pointer it's passed. If we
-            // passed it 'data->data' directly, it would modify structures owned by peerCert.
-            const unsigned char* dataBytes = data->data;
-            mongoDBAuthorizationGrants =
-                d2i_ASN1_SET_ANY(&mongoDBAuthorizationGrants, &dataBytes, data->length);
-            if (!mongoDBAuthorizationGrants) {
-                return Status(ErrorCodes::FailedToParse,
-                              "Failed to parse x509 authorization grants");
-            }
-            const auto grantGuard = MakeGuard([&mongoDBAuthorizationGrants]() {
-                sk_ASN1_TYPE_pop_free(mongoDBAuthorizationGrants, ASN1_TYPE_free);
-            });
-
-            /*
-             * MongoDBRole ::= SEQUENCE {
-             *  role     UTF8String,
-             *  database UTF8String
-             * }
-             */
-            // Loop through every role in the stack.
-            ASN1_TYPE* MongoDBRoleWrapped = nullptr;
-            while ((MongoDBRoleWrapped = sk_ASN1_TYPE_pop(mongoDBAuthorizationGrants))) {
-                const auto roleWrappedGuard =
-                    MakeGuard([MongoDBRoleWrapped]() { ASN1_TYPE_free(MongoDBRoleWrapped); });
-
-                if (MongoDBRoleWrapped->type == V_ASN1_SEQUENCE) {
-                    // Unwrap the ASN1Type into a STACK_OF(ASN1_TYPE)
-                    unsigned char* roleBytes = ASN1_STRING_data(MongoDBRoleWrapped->value.sequence);
-                    int roleBytesLength = ASN1_STRING_length(MongoDBRoleWrapped->value.sequence);
-                    ASN1_SEQUENCE_ANY* MongoDBRole = nullptr;
-                    MongoDBRole = d2i_ASN1_SEQUENCE_ANY(
-                        &MongoDBRole, (const unsigned char**)&roleBytes, roleBytesLength);
-                    if (!MongoDBRole) {
-                        return Status(ErrorCodes::FailedToParse,
-                                      "Failed to parse role in x509 authorization grant");
-                    }
-                    const auto roleGuard = MakeGuard(
-                        [&MongoDBRole]() { sk_ASN1_TYPE_pop_free(MongoDBRole, ASN1_TYPE_free); });
-
-                    if (sk_ASN1_TYPE_num(MongoDBRole) != 2) {
-                        return Status(ErrorCodes::FailedToParse,
-                                      "Role entity in MongoDBAuthorizationGrant must have exactly "
-                                      "2 sequence elements");
-                    }
-                    // Extract the subcomponents of the sequence, which are popped off the stack in
-                    // reverse order. Here, parse the role's database.
-                    ASN1_TYPE* roleComponent = sk_ASN1_TYPE_pop(MongoDBRole);
-                    const auto roleDBGuard =
-                        MakeGuard([roleComponent]() { ASN1_TYPE_free(roleComponent); });
-                    if (roleComponent->type != V_ASN1_UTF8STRING) {
-                        return Status(ErrorCodes::FailedToParse,
-                                      "database in MongoDBRole must be a UTF8 string");
-                    }
-                    std::string roleDB(
-                        reinterpret_cast<char*>(ASN1_STRING_data(roleComponent->value.utf8string)));
-
-                    // Parse the role's name.
-                    roleComponent = sk_ASN1_TYPE_pop(MongoDBRole);
-                    const auto roleNameGuard =
-                        MakeGuard([roleComponent]() { ASN1_TYPE_free(roleComponent); });
-                    if (roleComponent->type != V_ASN1_UTF8STRING) {
-                        return Status(ErrorCodes::FailedToParse,
-                                      "role in MongoDBRole must be a UTF8 string");
-                    }
-                    std::string roleName(
-                        reinterpret_cast<char*>(ASN1_STRING_data(roleComponent->value.utf8string)));
-
-                    // Construct a RoleName from the subcomponents
-                    roles.emplace(RoleName(roleName, roleDB));
-
-                } else {
-                    return Status(ErrorCodes::FailedToParse,
-                                  "Unrecognized entity in MongoDBAuthorizationGrant");
-                }
-            }
-            LOG(1) << "MONGODB-X509 authorization parsed the following roles from peer "
-                      "certificate: "
-                   << [&roles]() {
-                          StringBuilder sb;
-                          std::for_each(roles.begin(), roles.end(), [&sb](const RoleName& role) {
-                              sb << role.toString();
-                          });
-                          return sb.str();
-                      }();
+            return parsePeerRoles(
+                ConstDataRange(reinterpret_cast<char*>(data->data),
+                               reinterpret_cast<char*>(data->data) + data->length));
         }
     }
 
@@ -1458,7 +1381,8 @@ std::string SSLManagerInterface::getSSLErrorMessage(int code) {
     return msg;
 }
 
-void SSLManagerOpenSSL::_handleSSLError(int code, int ret) {
+void SSLManagerOpenSSL::_handleSSLError(SSLConnectionOpenSSL* conn, int ret) {
+    int code = SSL_get_error(conn->ssl, ret);
     int err = ERR_get_error();
 
     switch (code) {
@@ -1495,25 +1419,7 @@ void SSLManagerOpenSSL::_handleSSLError(int code, int ret) {
             error() << "unrecognized SSL error";
             break;
     }
+    _flushNetworkBIO(conn);
     throwSocketError(SocketErrorKind::CONNECT_ERROR, "");
 }
 }  // namespace mongo
-
-// TODO SERVER-11601 Use NFC Unicode canonicalization
-bool mongo::hostNameMatchForX509Certificates(std::string nameToMatch, std::string certHostName) {
-    nameToMatch = removeFQDNRoot(std::move(nameToMatch));
-    certHostName = removeFQDNRoot(std::move(certHostName));
-
-    if (certHostName.size() < 2) {
-        return false;
-    }
-
-    // match wildcard DNS names
-    if (certHostName[0] == '*' && certHostName[1] == '.') {
-        // allow name.example.com if the cert is *.example.com, '*' does not match '.'
-        const char* subName = strchr(nameToMatch.c_str(), '.');
-        return subName && !strcasecmp(certHostName.c_str() + 1, subName);
-    } else {
-        return !strcasecmp(nameToMatch.c_str(), certHostName.c_str());
-    }
-}

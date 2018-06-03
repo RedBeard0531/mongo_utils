@@ -38,6 +38,11 @@ struct checked_cast_impl<false> {
     static T cast(const U& u) {
         return static_cast<T>(u);
     }
+
+    template <typename T, typename U>
+    static T cast(U& u) {
+        return static_cast<T>(u);
+    }
 };
 
 template <>
@@ -56,10 +61,20 @@ struct checked_cast_impl<true> {
     static T cast(const U& u) {
         return dynamic_cast<T>(u);
     }
+
+    template <typename T, typename U>
+    static T cast(U& u) {
+        return dynamic_cast<T>(u);
+    }
 };
 
 template <typename T, typename U>
 T checked_cast(const U& u) {
+    return checked_cast_impl<kDebugBuild>::cast<T>(u);
+};
+
+template <typename T, typename U>
+T checked_cast(U& u) {
     return checked_cast_impl<kDebugBuild>::cast<T>(u);
 };
 

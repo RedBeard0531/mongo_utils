@@ -412,7 +412,7 @@ bool ProcessInfo::supported() {
 }
 
 // get the number of CPUs available to the current process
-boost::optional<unsigned long> ProcessInfo::getNumAvailableCores() {
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
     cpu_set_t set;
 
     if (sched_getaffinity(0, sizeof(cpu_set_t), &set) == 0) {
@@ -439,10 +439,6 @@ int ProcessInfo::getVirtualMemorySize() {
 int ProcessInfo::getResidentSize() {
     LinuxProc p(_pid);
     return (int)((p.getResidentSizeInPages() * getPageSize()) / (1024.0 * 1024));
-}
-
-double ProcessInfo::getMaxSystemFileCachePercentage() {
-    return 0.0;
 }
 
 double ProcessInfo::getSystemMemoryPressurePercentage() {

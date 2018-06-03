@@ -65,7 +65,7 @@ ProcessInfo::ProcessInfo(ProcessId pid) {}
 ProcessInfo::~ProcessInfo() {}
 
 // get the number of CPUs available to the current process
-boost::optional<unsigned long> ProcessInfo::getNumAvailableCores() {
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
     DWORD_PTR process_mask, system_mask;
 
     if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) {
@@ -105,39 +105,6 @@ int ProcessInfo::getResidentSize() {
     }
 
     return _wconvertmtos(pmc.WorkingSetSize);
-}
-
-double ProcessInfo::getMaxSystemFileCachePercentage() {
-    SIZE_T minCacheSize = 0;
-    SIZE_T maxCacheSize = 0;
-    DWORD flags = 0;
-    BOOL status = GetSystemFileCacheSize(&minCacheSize, &maxCacheSize, &flags);
-    if (!status) {
-        DWORD gle = GetLastError();
-        severe() << "GetSystemFileCacheSize failed with " << errnoWithDescription(gle);
-        fassertFailed(40667);
-    }
-
-    if (!(flags & FILE_CACHE_MAX_HARD_ENABLE)) {
-        return 1.0;
-    }
-
-    MEMORYSTATUSEX mse;
-    mse.dwLength = sizeof(mse);
-    status = GlobalMemoryStatusEx(&mse);
-    if (!status) {
-        DWORD gle = GetLastError();
-        severe() << "GlobalMemoryStatusEx failed with " << errnoWithDescription(gle);
-        fassertFailed(40668);
-    }
-
-    DWORDLONG totalMemorySize = mse.ullTotalPhys;
-    if (totalMemorySize == 0) {
-        severe() << "Total memory is 0";
-        fassertFailed(40669);
-    }
-
-    return static_cast<double>(maxCacheSize) / totalMemorySize;
 }
 
 double ProcessInfo::getSystemMemoryPressurePercentage() {
@@ -452,6 +419,8 @@ bool ProcessInfo::checkNumaEnabled() {
 }
 
 bool ProcessInfo::blockCheckSupported() {
+    sysInfo();  // Initialize SystemInfo, which calls collectSystemInfo(), which creates
+                // psapiGlobal.
     return psapiGlobal->supported;
 }
 

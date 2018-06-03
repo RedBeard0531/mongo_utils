@@ -27,6 +27,31 @@
 
 namespace mongo {
 
+class InitializerDependencyNode {
+    friend class InitializerDependencyGraph;
+
+public:
+    bool isInitialized() const {
+        return initialized;
+    }
+    void setInitialized(bool value) {
+        initialized = value;
+    };
+
+    InitializerFunction const& getInitializerFunction() const {
+        return initFn;
+    }
+    DeinitializerFunction const& getDeinitializerFunction() const {
+        return deinitFn;
+    }
+
+private:
+    InitializerFunction initFn;
+    DeinitializerFunction deinitFn;
+    stdx::unordered_set<std::string> prerequisites;
+    bool initialized{false};
+};
+
 /**
  * Representation of a dependency graph of "initialization operations."
  *
@@ -62,16 +87,17 @@ public:
      * to the graph.  Note that cycles in the dependency graph are not discovered in this phase.
      * Rather, they're discovered by topSort, below.
      */
-    Status addInitializer(const std::string& name,
-                          const InitializerFunction& fn,
-                          const std::vector<std::string>& prerequisites,
-                          const std::vector<std::string>& dependents);
+    Status addInitializer(std::string name,
+                          InitializerFunction initFn,
+                          DeinitializerFunction deinitFn,
+                          std::vector<std::string> prerequisites,
+                          std::vector<std::string> dependents);
 
     /**
      * Given a dependency operation node named "name", return its behavior function.  Returns
      * a value that evaluates to "false" in boolean context, otherwise.
      */
-    InitializerFunction getInitializerFunction(const std::string& name) const;
+    InitializerDependencyNode* getInitializerNode(const std::string& name);
 
     /**
      * Construct a topological sort of the dependency graph, and store that order into
@@ -89,12 +115,7 @@ public:
     Status topSort(std::vector<std::string>* sortedNames) const;
 
 private:
-    struct NodeData {
-        InitializerFunction fn;
-        stdx::unordered_set<std::string> prerequisites;
-    };
-
-    typedef stdx::unordered_map<std::string, NodeData> NodeMap;
+    typedef stdx::unordered_map<std::string, InitializerDependencyNode> NodeMap;
     typedef NodeMap::value_type Node;
 
     /**

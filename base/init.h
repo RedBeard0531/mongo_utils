@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "mongo/base/deinitializer_context.h"
 #include "mongo/base/global_initializer.h"
 #include "mongo/base/global_initializer_registerer.h"
 #include "mongo/base/initializer.h"
@@ -49,7 +50,7 @@
 /**
  * Convenience parameter representing the default set of dependents for initializer functions.
  */
-#define MONGO_DEFAULT_PREREQUISITES ("default")
+#define MONGO_DEFAULT_PREREQUISITES (MONGO_DEFAULT_PREREQUISITES_STR)
 
 /**
  * Macro to define an initializer function named "NAME" with the default prerequisites, and
@@ -104,15 +105,15 @@
  * of the function to declare would be options.
  */
 #define MONGO_INITIALIZER_GENERAL(NAME, PREREQUISITES, DEPENDENTS)                        \
-    ::mongo::Status _MONGO_INITIALIZER_FUNCTION_NAME(NAME)(::mongo::InitializerContext*); \
+    ::mongo::Status MONGO_INITIALIZER_FUNCTION_NAME_(NAME)(::mongo::InitializerContext*); \
     namespace {                                                                           \
     ::mongo::GlobalInitializerRegisterer _mongoInitializerRegisterer_##NAME(              \
-        #NAME,                                                                            \
-        _MONGO_INITIALIZER_FUNCTION_NAME(NAME),                                           \
+        std::string(#NAME),                                                               \
         MONGO_MAKE_STRING_VECTOR PREREQUISITES,                                           \
-        MONGO_MAKE_STRING_VECTOR DEPENDENTS);                                             \
+        MONGO_MAKE_STRING_VECTOR DEPENDENTS,                                              \
+        mongo::InitializerFunction(MONGO_INITIALIZER_FUNCTION_NAME_(NAME)));              \
     }                                                                                     \
-    ::mongo::Status _MONGO_INITIALIZER_FUNCTION_NAME(NAME)
+    ::mongo::Status MONGO_INITIALIZER_FUNCTION_NAME_(NAME)
 
 /**
  * Macro to define an initializer group.
@@ -130,4 +131,4 @@
  * Macro to produce a name for a mongo initializer function for an initializer operation
  * named "NAME".
  */
-#define _MONGO_INITIALIZER_FUNCTION_NAME(NAME) _mongoInitializerFunction_##NAME
+#define MONGO_INITIALIZER_FUNCTION_NAME_(NAME) _mongoInitializerFunction_##NAME

@@ -28,6 +28,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/net/sock.h"
+#include "mongo/util/net/ssl/apple.hpp"
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/time_support.h"
 
@@ -55,6 +56,9 @@ typedef SSL* SSLConnectionType;
 #elif MONGO_CONFIG_SSL_PROVIDER == SSL_PROVIDER_WINDOWS
 typedef SCHANNEL_CRED* SSLContextType;
 typedef PCtxtHandle SSLConnectionType;
+#elif MONGO_CONFIG_SSL_PROVIDER == SSL_PROVIDER_APPLE
+typedef asio::ssl::apple::Context* SSLContextType;
+typedef SSLContextRef SSLConnectionType;
 #else
 #error "Unknown SSL Provider"
 #endif
@@ -71,18 +75,11 @@ public:
 };
 
 struct SSLConfiguration {
-    SSLConfiguration() : serverSubjectName(""), clientSubjectName("") {}
-    SSLConfiguration(const std::string& serverSubjectName,
-                     const std::string& clientSubjectName,
-                     const Date_t& serverCertificateExpirationDate)
-        : serverSubjectName(serverSubjectName),
-          clientSubjectName(clientSubjectName),
-          serverCertificateExpirationDate(serverCertificateExpirationDate) {}
-
     bool isClusterMember(StringData subjectName) const;
+    bool isClusterMember(const SSLX509Name& subjectName) const;
     BSONObj getServerStatusBSON() const;
-    std::string serverSubjectName;
-    std::string clientSubjectName;
+    SSLX509Name serverSubjectName;
+    SSLX509Name clientSubjectName;
     Date_t serverCertificateExpirationDate;
     bool hasCA = false;
 };
@@ -204,6 +201,18 @@ bool hostNameMatchForX509Certificates(std::string nameToMatch, std::string certH
  * Parse a binary blob of DER encoded ASN.1 into a set of RoleNames.
  */
 StatusWith<stdx::unordered_set<RoleName>> parsePeerRoles(ConstDataRange cdrExtension);
+
+/**
+ * Strip the trailing '.' in FQDN.
+ */
+std::string removeFQDNRoot(std::string name);
+
+/**
+ * Escape a string per RGC 2253
+ *
+ * See "2.4 Converting an AttributeValue from ASN.1 to a String" in RFC 2243
+ */
+std::string escapeRfc2253(StringData str);
 
 }  // namespace mongo
 #endif  // #ifdef MONGO_CONFIG_SSL

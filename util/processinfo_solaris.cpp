@@ -98,7 +98,7 @@ bool ProcessInfo::supported() {
 }
 
 // get the number of CPUs available to the scheduler
-boost::optional<unsigned long> ProcessInfo::getNumAvailableCores() {
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
     long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
     if (nprocs)
         return nprocs;
@@ -113,10 +113,6 @@ int ProcessInfo::getVirtualMemorySize() {
 int ProcessInfo::getResidentSize() {
     ProcPsinfo p;
     return static_cast<int>(p.psinfo.pr_rssize / 1024);
-}
-
-double ProcessInfo::getMaxSystemFileCachePercentage() {
-    return 0.0;
 }
 
 double ProcessInfo::getSystemMemoryPressurePercentage() {
